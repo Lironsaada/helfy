@@ -89,10 +89,10 @@ curl http://localhost:3000/api/me \
 
 ```bash
 # User activity logs (shows login events)
-docker compose logs backend | grep '{"timestamp"'
+docker compose logs backend | grep timestamp
 
 # Database change logs (CDC events)
-docker compose logs consumer | grep '{"timestamp"'
+docker compose logs consumer | grep timestamp
 
 # All logs
 docker compose logs -f
