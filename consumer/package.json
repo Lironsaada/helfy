@@ -1,0 +1,16 @@
+{
+  "name": "cdc-consumer",
+  "version": "1.0.0",
+  "description": "Kafka consumer for TiDB CDC events",
+  "main": "consumer.js",
+  "scripts": {
+    "start": "node consumer.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "kafkajs": "^2.2.4",
+    "log4js": "^6.9.1"
+  }
+}

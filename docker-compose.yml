@@ -1,0 +1,229 @@
+services:
+  # Placement Driver (PD) - TiDB cluster coordinator
+  pd:
+    image: pingcap/pd:latest
+    # Ports exposed only within Docker network, not to host
+    expose:
+      - "2379"
+      - "2380"
+    command:
+      - --name=pd
+      - --client-urls=http://0.0.0.0:2379
+      - --peer-urls=http://0.0.0.0:2380
+      - --advertise-client-urls=http://pd:2379
+      - --advertise-peer-urls=http://pd:2380
+      - --data-dir=/data/pd
+    volumes:
+      - pd-data:/data/pd
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # TiKV - Storage layer
+  tikv:
+    image: pingcap/tikv:latest
+    ports:
+      - "20160:20160"
+    command:
+      - --addr=0.0.0.0:20160
+      - --advertise-addr=tikv:20160
+      - --pd=pd:2379
+      - --data-dir=/data/tikv
+    volumes:
+      - tikv-data:/data/tikv
+    networks:
+      - app-network
+    depends_on:
+      - pd
+    restart: unless-stopped
+
+  # TiDB - SQL layer
+  tidb:
+    image: pingcap/tidb:latest
+    ports:
+      - "4000:4000"
+      - "10080:10080"
+    command:
+      - --store=tikv
+      - --path=pd:2379
+      - --advertise-address=tidb
+      - -L=info
+    networks:
+      - app-network
+    depends_on:
+      - tikv
+      - pd
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:10080/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Zookeeper - Required for Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # Kafka - Message broker
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # TiCDC - Change Data Capture
+  ticdc:
+    image: pingcap/ticdc:latest
+    ports:
+      - "8301:8301"
+    command:
+      - /cdc
+      - server
+      - --addr=0.0.0.0:8301
+      - --advertise-addr=ticdc:8301
+      - --pd=http://pd:2379
+      - --data-dir=/data/ticdc
+      - --log-file=/data/ticdc/ticdc.log
+      - --log-level=info
+    volumes:
+      - ticdc-data:/data/ticdc
+    networks:
+      - app-network
+    depends_on:
+      tidb:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # CDC Configurator - Initializes CDC changefeed
+  cdc-configurator:
+    image: curlimages/curl:latest
+    networks:
+      - app-network
+    depends_on:
+      - ticdc
+      - kafka
+    command: >
+      sh -c '
+        echo "Waiting for TiCDC to be ready..." &&
+        sleep 25 &&
+        echo "Creating CDC changefeed..." &&
+        curl -X POST http://ticdc:8301/api/v1/changefeeds \
+          -H "Content-Type: application/json" \
+          -d "{\"changefeed_id\":\"db-changes\",\"sink_uri\":\"kafka://kafka:9092/tidb-changes?protocol=canal-json\",\"config\":{\"sink\":{\"protocol\":\"canal-json\"}}}" &&
+        echo "CDC changefeed created successfully" &&
+        tail -f /dev/null
+      '
+    restart: on-failure
+
+  # Backend API service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - DB_HOST=tidb
+      - DB_PORT=4000
+      - DB_USER=root
+      - DB_PASSWORD=
+      - DB_NAME=authdb
+    networks:
+      - app-network
+    depends_on:
+      tidb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Database Initializer - Creates default user
+  db-initializer:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    networks:
+      - app-network
+    environment:
+      - DB_HOST=tidb
+      - DB_PORT=4000
+      - DB_USER=root
+      - DB_PASSWORD=
+      - DB_NAME=authdb
+    depends_on:
+      backend:
+        condition: service_started
+    command: >
+      sh -c "
+        sleep 10 &&
+        node /app/scripts/init-db.js &&
+        echo 'Database initialized with default user'
+      "
+    restart: on-failure
+
+  # CDC Consumer - Processes database changes from Kafka
+  consumer:
+    build:
+      context: ./consumer
+      dockerfile: Dockerfile
+    networks:
+      - app-network
+    environment:
+      - KAFKA_BROKER=kafka:9092
+      - KAFKA_TOPIC=tidb-changes
+      - KAFKA_GROUP_ID=cdc-consumer-group
+    depends_on:
+      kafka:
+        condition: service_healthy
+      ticdc:
+        condition: service_started
+    restart: unless-stopped
+
+  # Frontend service
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    networks:
+      - app-network
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  pd-data:
+  tikv-data:
+  ticdc-data:
+
+networks:
+  app-network:
+    driver: bridge
