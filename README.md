@@ -87,12 +87,68 @@ curl http://localhost:3000/api/me \
 
 ### 7. View Logs
 
+#### View User Registrations
+Registration events are captured by CDC and appear in the consumer logs:
+
 ```bash
-# User activity logs (shows login events)
+# Show all user registrations
+docker compose logs consumer | grep '"table":"users"'
+
+# Show last 5 registrations
+docker compose logs consumer | grep '"table":"users"' | tail -5
+
+# Watch registrations in real-time
+docker compose logs -f consumer | grep '"table":"users"'
+```
+
+Example output:
+```json
+{"timestamp":"2026-01-08T12:05:04.209Z","database":"authdb","table":"users","eventType":"INSERT","data":{"id":"2","email":"test@example.com","username":"testuser","password_hash":"$2a$10$...","created_at":"2026-01-08 12:05:03"},"old":null}
+```
+
+#### View User Logins
+Login events are logged by the backend in JSON format:
+
+```bash
+# Show all login events
 docker compose logs backend | grep timestamp
 
-# Database change logs (CDC events)
-docker compose logs consumer | grep timestamp
+# Show last 5 logins
+docker compose logs backend | grep timestamp | tail -5
+
+# Watch logins in real-time
+docker compose logs -f backend | grep timestamp
+```
+
+Example output:
+```json
+{"timestamp":"2026-01-08T12:04:41.122Z","userId":1,"username":"admin","action":"login","ipAddress":"::ffff:172.19.0.1","email":"admin@example.com"}
+```
+
+#### View All Database Changes
+See all CDC-captured database changes (users, tokens, etc.):
+
+```bash
+# All database changes
+docker compose logs consumer | grep '"database":"authdb"'
+
+# Watch all changes in real-time
+docker compose logs -f consumer | grep '"database":"authdb"'
+```
+
+#### View Service Logs
+```bash
+# Backend API logs
+docker compose logs backend
+
+# Consumer (CDC processor) logs
+docker compose logs consumer
+
+# TiDB database logs
+docker compose logs tidb
+
+# TiCDC (change capture) logs
+docker compose logs ticdc
 
 # All logs
 docker compose logs -f
